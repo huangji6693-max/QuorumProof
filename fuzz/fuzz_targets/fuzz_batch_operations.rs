@@ -92,7 +92,7 @@ fn test_single_issuer_batch(env: &Env, client: &QuorumProofContractClient, input
             _ => Address::generate(&env),
         };
 
-        let credential_type = input.type_seed.wrapping_add(i as u32).max(1);
+        let credential_type = 1 + (input.type_seed.wrapping_add(i as u32) % (u32::MAX - 1));
         let metadata = generate_metadata_for_batch(input.metadata_complexity, i as u32);
         let meta_bytes = Bytes::from_slice(&env, &metadata);
 
@@ -134,7 +134,8 @@ fn test_multiple_issuers_batch(env: &Env, client: &QuorumProofContractClient, in
 
         for cred_idx in 0..batch_size {
             let subject = Address::generate(&env);
-            let credential_type = input.type_seed.wrapping_add((issuer_idx as u32 * 10000) + cred_idx as u32).max(1);
+            let credential_type =
+                1 + (input.type_seed.wrapping_add((issuer_idx as u32 * 10000) + cred_idx as u32) % (u32::MAX - 1));
             let metadata = generate_metadata_for_batch(input.metadata_complexity, (issuer_idx as u32 * 1000) + cred_idx as u32);
             let meta_bytes = Bytes::from_slice(&env, &metadata);
 
@@ -152,16 +153,20 @@ fn test_multiple_issuers_batch(env: &Env, client: &QuorumProofContractClient, in
 
 /// Test large batch with integrity verification
 fn test_large_batch_with_verification(env: &Env, client: &QuorumProofContractClient, input: &BatchOperationsFuzzInput) {
-    let issuer = Address::generate(&env);
+    let mut issuer = Address::generate(&env);
     let batch_size = (input.batch_size as usize).clamp(100, 2000); // 100-2000 for scale testing
 
     let mut credential_ids = vec![];
+    let mut issuers = vec![];
     let mut subjects = vec![];
 
-    // Issue batch
+    // Issue batch (rotating issuer every 900 calls so per-issuer rate limit of 1000 does not reject valid batch items)
     for i in 0..batch_size {
+        if i > 0 && i % 900 == 0 {
+            issuer = Address::generate(&env);
+        }
         let subject = Address::generate(&env);
-        let credential_type = (2000u32).wrapping_add(i as u32);
+        let credential_type = 1 + (2000u32.wrapping_add(i as u32) % (u32::MAX - 1));
         let metadata = generate_metadata_for_batch(input.metadata_complexity, i as u32);
         let meta_bytes = Bytes::from_slice(&env, &metadata);
 
@@ -169,6 +174,7 @@ fn test_large_batch_with_verification(env: &Env, client: &QuorumProofContractCli
             client.issue_credential(&issuer, &subject, &credential_type, &meta_bytes, &None, &0u64)
         })) {
             credential_ids.push(cred_id);
+            issuers.push(issuer.clone());
             subjects.push(subject);
         }
     }
@@ -180,7 +186,7 @@ fn test_large_batch_with_verification(env: &Env, client: &QuorumProofContractCli
             client.get_credential(&cred_id)
         })) {
             // Verify critical properties
-            assert_eq!(credential.issuer, issuer, "Issuer mismatch at credential {}", idx);
+            assert_eq!(credential.issuer, issuers[idx], "Issuer mismatch at credential {}", idx);
             assert_eq!(credential.subject, subjects[idx], "Subject mismatch at credential {}", idx);
             assert!(!credential.revoked, "Credential {} should not be revoked", idx);
             assert!(credential.credential_type > 0, "Invalid credential type at {}", idx);
@@ -190,18 +196,20 @@ fn test_large_batch_with_verification(env: &Env, client: &QuorumProofContractCli
 
 /// Test maximum batch size that contract can handle
 fn test_maximum_batch_size(env: &Env, client: &QuorumProofContractClient, input: &BatchOperationsFuzzInput) {
-    let issuer = Address::generate(&env);
-    
     // Test progressively larger batches to find limits
     let test_sizes = vec![100, 500, 1000, 2000];
     
     for &size in &test_sizes {
+        let mut issuer = Address::generate(&env);
         let mut successful = 0u64;
         let mut failed = 0u64;
 
         for i in 0..size {
+            if i > 0 && i % 900 == 0 {
+                issuer = Address::generate(&env);
+            }
             let subject = Address::generate(&env);
-            let credential_type = input.type_seed.wrapping_add(i as u32).max(1);
+            let credential_type = 1 + (input.type_seed.wrapping_add(i as u32) % (u32::MAX - 1));
             let metadata = generate_metadata_for_batch(input.metadata_complexity, i as u32);
             let meta_bytes = Bytes::from_slice(&env, &metadata);
 
