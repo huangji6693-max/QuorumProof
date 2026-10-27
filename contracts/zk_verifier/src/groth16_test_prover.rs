@@ -44,7 +44,8 @@ pub struct ToyProof {
 /// trusted setup. Fine for tests — a real deployment must run an actual
 /// multi-party ceremony.
 fn toxic_waste(seed: u64) -> Scalar {
-    Scalar::from(0x51e_c0de_u64.wrapping_mul(seed).wrapping_add(424_242))
+    let raw = 0x51e_c0de_u64.wrapping_mul(seed).wrapping_add(424_242);
+    Scalar::from(if raw == 0 { 1 } else { raw })
 }
 
 /// Generates a toy Groth16 verifying key with `num_public_inputs`
@@ -110,13 +111,11 @@ pub fn generate_proof(env: &Env, vk: &ToyVerifyingKey, proof_seed: u64, public_i
         "public_input_values length must match vk's public-input count"
     );
 
-    let a_s = toxic_waste(proof_seed.wrapping_add(5));
+    let mut a_s = toxic_waste(proof_seed.wrapping_add(5));
     let b_s = toxic_waste(proof_seed.wrapping_add(6));
 
     let g1 = G1Affine::generator();
     let g2 = G2Affine::generator();
-    let a = G1Affine::from(g1 * a_s);
-    let b = G2Affine::from(g2 * b_s);
 
     let public_input_scalars: Vec<Scalar> = public_input_values.iter().map(|v| Scalar::from(*v)).collect();
 
@@ -127,7 +126,14 @@ pub fn generate_proof(env: &Env, vk: &ToyVerifyingKey, proof_seed: u64, public_i
 
     let delta_inv = Option::<Scalar>::from(vk.delta_s.invert()).expect("delta must be invertible");
     // Solve for C such that a*b == alpha*beta + vk_x*gamma + c_exp*delta.
-    let c_exp = (a_s * b_s - vk.alpha_s * vk.beta_s - vk_x_s * vk.gamma_s) * delta_inv;
+    let mut num = a_s * b_s - vk.alpha_s * vk.beta_s - vk_x_s * vk.gamma_s;
+    if num == Scalar::zero() {
+        a_s += Scalar::one();
+        num = a_s * b_s - vk.alpha_s * vk.beta_s - vk_x_s * vk.gamma_s;
+    }
+    let a = G1Affine::from(g1 * a_s);
+    let b = G2Affine::from(g2 * b_s);
+    let c_exp = num * delta_inv;
     let c = G1Affine::from(g1 * c_exp);
 
     let mut proof_buf = [0u8; PROOF_LEN as usize];
@@ -170,3 +176,47 @@ pub fn generate_valid_proof(env: &Env, seed: u64, num_public_inputs: u32) -> Toy
         proof: proof.proof,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClaimType, ZkVerifierContract, ZkVerifierContractClient};
+    use soroban_sdk::{testutils::Address as _, Address};
+
+    #[test]
+    fn test_toxic_waste_never_produces_zero_scalar_on_wrapping_zero_seed() {
+        // Solve 0x51ec0de * seed + 424242 == 0 (mod 2^64) via Newton's method on 0x28f606f
+        let odd_factor: u64 = 0x51e_c0de_u64 >> 1;
+        let mut inv: u64 = 1;
+        for _ in 0..6 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(odd_factor.wrapping_mul(inv)));
+        }
+        let zero_producing_seed = inv.wrapping_mul((0u64.wrapping_sub(424_242)) >> 1);
+        assert_eq!(
+            0x51e_c0de_u64
+                .wrapping_mul(zero_producing_seed)
+                .wrapping_add(424_242),
+            0
+        );
+
+        // Even when raw wrapping arithmetic hits 0, toxic_waste and generate_vk must succeed
+        let s = toxic_waste(zero_producing_seed);
+        assert_ne!(s, Scalar::zero());
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, ZkVerifierContract);
+        let client = ZkVerifierContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let vk_seed = zero_producing_seed.wrapping_sub(4); // hits delta_s = toxic_waste(seed + 4)
+        let toy = generate_vk(&env, vk_seed, 2);
+        client.set_groth16_verifying_key(&admin, &toy.vk_hash, &toy.vk);
+
+        let qp_id = Address::generate(&env);
+        let valid = generate_proof(&env, &toy, vk_seed, &[0, 1]);
+        assert!(client.verify_claim(&admin, &qp_id, &0, &ClaimType::HasDegree, &valid.proof));
+    }
+}
+

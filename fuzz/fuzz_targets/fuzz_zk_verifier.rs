@@ -39,6 +39,7 @@ fn claim_discriminant(claim_type: &ClaimType) -> u64 {
 fn known_invalid_proofs(
     env: &Env,
     toy: &ToyVerifyingKey,
+    toy_seed: u64,
     credential_id: u64,
     claim: u64,
     valid: &[u8],
@@ -51,9 +52,19 @@ fn known_invalid_proofs(
     let mut long = valid.to_vec();
     long.push(0);
 
-    let other_cid = groth16_test_prover::generate_proof(env, toy, 77, &[credential_id.wrapping_add(1), claim]);
+    let other_cid = groth16_test_prover::generate_proof(
+        env,
+        toy,
+        toy_seed.wrapping_add(1),
+        &[credential_id.wrapping_add(1), claim],
+    );
     let other_claim_value = (claim % 5) + 1;
-    let other_claim = groth16_test_prover::generate_proof(env, toy, 78, &[credential_id, other_claim_value]);
+    let other_claim = groth16_test_prover::generate_proof(
+        env,
+        toy,
+        toy_seed.wrapping_add(2),
+        &[credential_id, other_claim_value],
+    );
 
     vec![
         ("empty", Bytes::new(env)),
@@ -125,7 +136,14 @@ fuzz_target!(|input: FuzzInput| {
 
     // Known-invalid corpus: every entry must be rejected without panicking.
     let valid_bytes = valid.proof.to_alloc_vec();
-    for (name, bad) in known_invalid_proofs(&env, &toy, input.credential_id, claim, &valid_bytes) {
+    for (name, bad) in known_invalid_proofs(
+        &env,
+        &toy,
+        input.vk_seed,
+        input.credential_id,
+        claim,
+        &valid_bytes,
+    ) {
         assert_eq!(verify(&bad), Some(false), "known-invalid proof `{name}` must be rejected");
     }
 
