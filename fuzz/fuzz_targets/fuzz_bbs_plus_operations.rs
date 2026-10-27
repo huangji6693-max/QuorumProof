@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use bbs_plus_v1::{
-    BbsPresentation, BbsSignature, PresentationProof, SigningKey, VerifyingKey,
+    BbsPresentation, BbsSignature, PresentationProof, Signature, SigningKey, VerifyingKey,
     primitives::Fr,
 };
 use rand::rngs::StdRng;
@@ -36,13 +36,17 @@ struct BbsPlusFuzzInput {
 fuzz_target!(|input: BbsPlusFuzzInput| {
     // ── Bound inputs to keep runtime tractable ──────────────────────────────
     // At most 16 messages; at least 1 so VerifyingKey::derive doesn't get 0.
-    let message_count = (input.message_scalars.len() % 16) + 1;
-    let messages: Vec<Fr> = input
-        .message_scalars
-        .iter()
-        .take(message_count)
-        .map(|&v| Fr::from_u64(v))
-        .collect();
+    let messages: Vec<Fr> = if input.message_scalars.is_empty() {
+        vec![Fr::from_u64(input.seed)]
+    } else {
+        input
+            .message_scalars
+            .iter()
+            .take(16)
+            .map(|&v| Fr::from_u64(v))
+            .collect()
+    };
+    let message_count = messages.len() as u32;
 
     // ── Deterministic RNG seeded from fuzz input ─────────────────────────────
     let mut rng = StdRng::seed_from_u64(input.seed);
@@ -90,11 +94,11 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
 
     // ── 6. Presentation creation (selective disclosure) ──────────────────────
     // Convert revealed_indices to the subset of valid indices.
-    let all_indices: Vec<u32> = (0..message_count as u32).collect();
+    let all_indices: Vec<u32> = (0..message_count).collect();
     let revealed: Vec<u32> = input
         .revealed_indices
         .iter()
-        .map(|&i| (i as u32) % message_count as u32)
+        .map(|&i| (i as u32) % message_count)
         .collect::<std::collections::BTreeSet<_>>() // deduplicate
         .into_iter()
         .collect();
@@ -159,6 +163,11 @@ fuzz_target!(|input: BbsPlusFuzzInput| {
     // by constructing a presentation from corrupt bytes and verifying — the
     // result must be Err or Ok(false), never a panic.
     if !input.corrupt_sig_bytes.is_empty() {
+        if let Ok(raw_sig) = <&[u8; 112]>::try_from(input.corrupt_sig_bytes.as_slice()) {
+            if let Ok(corrupt_sig) = Signature::from_bytes(raw_sig) {
+                let _ = BbsSignature::verify(&vk, &messages, &corrupt_sig);
+            }
+        }
         if let Ok(corrupt_proof) = PresentationProof::from_bytes(&input.corrupt_sig_bytes) {
             // Must not panic regardless of result.
             let _ = BbsPresentation::verify_presentation(&vk, &corrupt_proof, nonce);

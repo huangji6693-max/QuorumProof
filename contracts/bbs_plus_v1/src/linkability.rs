@@ -60,7 +60,7 @@ use alloc::vec::Vec;
 use crate::errors::{BbsError, BbsResult};
 use crate::presentation::{BbsPresentation, PresentationProof};
 use crate::primitives::Fr;
-use crate::signature::{BbsSignature, VerifyingKey};
+use crate::signature::{Signature, VerifyingKey};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Nonce generation
@@ -170,16 +170,26 @@ impl UnlinkableDisclosure {
         off += cid_len;
 
         let idx_count = read_u32(bytes, &mut off)? as usize;
+        if idx_count
+            .checked_mul(4)
+            .map_or(true, |n| off.saturating_add(n) > bytes.len())
+        {
+            return Err(BbsError::DeserializationError);
+        }
         let mut disclosed_indices = Vec::with_capacity(idx_count);
         for _ in 0..idx_count {
             disclosed_indices.push(read_u32(bytes, &mut off)?);
         }
 
         let proof_len = read_u32(bytes, &mut off)? as usize;
-        if off + proof_len > bytes.len() {
+        if off.saturating_add(proof_len) > bytes.len() {
             return Err(BbsError::DeserializationError);
         }
         let proof_bytes = bytes[off..off + proof_len].to_vec();
+        off += proof_len;
+        if off != bytes.len() {
+            return Err(BbsError::DeserializationError);
+        }
 
         Ok(UnlinkableDisclosure {
             proof_bytes,
@@ -232,7 +242,7 @@ fn read_u32(bytes: &[u8], offset: &mut usize) -> BbsResult<u32> {
 pub fn create_unlinkable_disclosure<R: rand::RngCore>(
     rng: &mut R,
     credential_id: &[u8],
-    signature: &BbsSignature,
+    signature: &Signature,
     vk: &VerifyingKey,
     messages: &[Fr],
     disclosed_indices: &[u32],

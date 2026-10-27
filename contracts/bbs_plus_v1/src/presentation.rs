@@ -84,7 +84,7 @@ impl PresentationProof {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> BbsResult<Self> {
-        const FIXED_LEN: usize = 48 * 3 + 32 * 4;
+        const FIXED_LEN: usize = 48 * 3 + 32 * 5;
         if bytes.len() < FIXED_LEN + 8 {
             return Err(BbsError::DeserializationError);
         }
@@ -101,6 +101,10 @@ impl PresentationProof {
 
         let hidden_message_hats = read_indexed_map(bytes, &mut offset)?;
         let revealed_messages = read_indexed_map(bytes, &mut offset)?;
+
+        if offset != bytes.len() {
+            return Err(BbsError::DeserializationError);
+        }
 
         Ok(PresentationProof {
             a_bar,
@@ -146,6 +150,13 @@ fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32,
     let count = u32::from_le_bytes(count_bytes) as usize;
     *offset += 4;
 
+    if count
+        .checked_mul(36)
+        .map_or(true, |n| offset.saturating_add(n) > bytes.len())
+    {
+        return Err(BbsError::DeserializationError);
+    }
+
     let mut map = BTreeMap::new();
     for _ in 0..count {
         if *offset + 4 > bytes.len() {
@@ -156,7 +167,9 @@ fn read_indexed_map(bytes: &[u8], offset: &mut usize) -> BbsResult<BTreeMap<u32,
         let idx = u32::from_le_bytes(idx_bytes);
         *offset += 4;
         let val = read_fr(bytes, offset)?;
-        map.insert(idx, val);
+        if map.insert(idx, val).is_some() {
+            return Err(BbsError::DeserializationError);
+        }
     }
     Ok(map)
 }
@@ -579,5 +592,41 @@ mod tests {
         let result =
             BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[5], b"nonce");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_presentation_proof_from_bytes_rejects_truncated_and_corrupt_inputs() {
+        let (sk, vk) = setup(2);
+        let mut r = rng();
+        let messages = vec![Fr::from_u64(7), Fr::from_u64(13)];
+        let sig = BbsSignature::sign(&mut r, &sk, &vk, &messages).unwrap();
+        let proof =
+            BbsPresentation::create_presentation(&mut r, &sig, &vk, &messages, &[0], b"nonce")
+                .unwrap();
+        let valid_bytes = proof.to_bytes();
+
+        // Any prefix shorter than minimum 312 bytes (including 272..311 range) must fail cleanly
+        for len in [0usize, 1, 272, 280, 304, 311] {
+            assert!(matches!(
+                PresentationProof::from_bytes(&valid_bytes[..len]),
+                Err(BbsError::DeserializationError)
+            ));
+        }
+
+        // Trailing bytes must be rejected
+        let mut with_trailing = valid_bytes.clone();
+        with_trailing.push(0xAA);
+        assert!(matches!(
+            PresentationProof::from_bytes(&with_trailing),
+            Err(BbsError::DeserializationError)
+        ));
+
+        // Oversized map count in header must be rejected immediately without OOM
+        let mut oversized_count = valid_bytes[..312].to_vec();
+        oversized_count[304..308].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            PresentationProof::from_bytes(&oversized_count),
+            Err(BbsError::DeserializationError)
+        ));
     }
 }

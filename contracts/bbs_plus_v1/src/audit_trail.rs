@@ -257,6 +257,7 @@ impl Default for AuditTrail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     const CRED_A: &[u8] = b"credential-1";
     const CRED_B: &[u8] = b"credential-2";
